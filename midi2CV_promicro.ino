@@ -1,7 +1,14 @@
-#define  MIDI_RXCH               10
-#define  PULSE_LED_LENGHT        100 // in uSeconds
-#define  PULSE_CLOCK_OUT_LENGHT  10 //in uSeconds
+// -----------------------------------------------------------------------------
+// USER SETTINGS
 
+#define  MIDI_RXCH               1
+#define  PULSE_LED_LENGHT        100 // led ON pulse lenght in milliSeconds
+#define  PULSE_CLOCK_OUT_LENGHT  125 // clock ON pulse lenght in milliSeconds
+
+#define  _COOLFUN_LED_MORSE      // optional: comment this to inhibit the send of "COOLFUN" in morse to the led at start
+#define  MORSE_STRING            "COOLFUN" // optional string to send in morse to led at startup
+
+// -----------------------------------------------------------------------------
 // HARDWARE
 #define  CLOCK_OUT   18
 #define  GATE_OUT    15
@@ -9,21 +16,38 @@
 #define  AUX1_IO     16
 #define  AUX2_IO     10
 
-#define  CS_4822     4
-#define  LDAC_4822   5
+#define  CS_4822     4 //Chip select DAC
+#define  LDAC_4822   5 // Load DAC pin; not used by the MCP4822 library tight to low
 
+// -----------------------------------------------------------------------------
+// LIBRARIES STUFFs
+
+//useful time lib ***********
 #include <elapsedMillis.h>
 
+//DAC lib **************
 #include <MCP48xx.h>
 // Define the MCP4822 instance, giving it the SS (Slave Select) pin
 // The constructor will also initialize the SPI library
 // We can also define a MCP4812 or MCP4802
 MCP4822 dac(CS_4822);
 
+//midi lib *************
 #include <MIDI.h>
-
 //MIDI_CREATE_DEFAULT_INSTANCE();
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
+
+// if you want some fun at startup; init morse lib **************
+#ifdef _COOLFUN_LED_MORSE
+
+#include <cww_MorseTx.h> // //geek led communication !! blocking lib !! only for coolfun init ; do not use in main loop !!!
+
+cww_MorseTx morse(LED_OUT, 20); //output morse on pin LED_OUT at 20 words/min
+
+#endif
+
+// -----------------------------------------------------------------------------
+// GLOBALs VARIABLEs
 
 uint8_t  midiClock_counter = 0;
 
@@ -31,6 +55,7 @@ elapsedMillis  TS_pulseLED = 0;
 elapsedMillis  TS_clockOut = 0;
 
 // -----------------------------------------------------------------------------
+// MIDI handle routines
 
 // see documentation here:
 // https://github.com/FortySevenEffects/arduino_midi_library/wiki/Using-Callbacks
@@ -44,6 +69,10 @@ void handleNoteOn(byte channel, byte pitch, byte velocity)
     // on real-time performance.
     dac.setVoltageA(pitch * 8);
     dac.setVoltageB(velocity * 8);
+    // We send the command to the MCP4822
+    // This is needed every time we make any change
+    dac.updateDAC();
+    
     digitalWrite(GATE_OUT, true);
 
     pulseLED( true );
@@ -56,6 +85,10 @@ void handleNoteOff(byte channel, byte pitch, byte velocity)
     // Note that NoteOn messages with 0 velocity are interpreted as NoteOffs.
     dac.setVoltageA(pitch * 8);
     dac.setVoltageB(velocity * 8);
+    // We send the command to the MCP4822
+    // This is needed every time we make any change
+    dac.updateDAC();
+    
     digitalWrite(GATE_OUT, false);
 
     pulseLED( true );
@@ -74,19 +107,6 @@ void handleClock(void)
     pulseLED( true );
 }
 
-void updateClockOut( boolean flagCLK )
-{
-   if( flagCLK ) TS_clockOut = 0 ;
-   
-   if( TS_clockOut > PULSE_CLOCK_OUT_LENGHT )
-   {
-      digitalWrite( CLOCK_OUT, false );
-   }else{
-      digitalWrite( CLOCK_OUT, true );
-   }
-
-}
-
 void handleStart(void)
 {
       midiClock_counter = 23; //last 
@@ -103,12 +123,33 @@ void handleStop(void)
     dac.setVoltageB(0);
     digitalWrite(GATE_OUT, false);
     digitalWrite(CLOCK_OUT, false);
+    // We send the command to the MCP4822
+    // This is needed every time we make any change
+    dac.updateDAC();
 
     pulseLED( true );
 }
 
+
+// -----------------------------------------------------------------------------
+// update routines 
+
+void updateClockOut( boolean flagCLK )
+{
+   if( flagCLK ) TS_clockOut = 0 ;
+   
+   if( TS_clockOut > PULSE_CLOCK_OUT_LENGHT )
+   {
+      digitalWrite( CLOCK_OUT, false );
+   }else{
+      digitalWrite( CLOCK_OUT, true );
+   }
+
+}
+
 void pulseLED( boolean flagPulseLed )
 {
+   
    if( flagPulseLed ) TS_pulseLED = 0 ;
    
    if( TS_pulseLED > PULSE_LED_LENGHT )
@@ -122,9 +163,12 @@ void pulseLED( boolean flagPulseLed )
 
 
 // -----------------------------------------------------------------------------
+// SETUP; run once at startup
 
 void setup()
 {
+    //init hardware ***************
+    
     pinMode(CLOCK_OUT, OUTPUT);
     digitalWrite(CLOCK_OUT, LOW);
 
@@ -134,16 +178,11 @@ void setup()
     pinMode(LED_OUT, OUTPUT);
     digitalWrite(LED_OUT, LOW);
 
-    pinMode(AUX1_IO , OUTPUT);
-    digitalWrite(AUX1_IO , LOW);
-
-    pinMode(AUX2_IO , OUTPUT);
-    digitalWrite(AUX2_IO , LOW);
-
     pinMode(LDAC_4822 , OUTPUT);
     digitalWrite(LDAC_4822 , LOW);
 
     
+    // init DAC ***************
     // We call the init() method to initialize the instance
 
     dac.init();
@@ -156,32 +195,48 @@ void setup()
     // It is also the default value so it is not really needed
     dac.setGainA(MCP4822::High);
     dac.setGainB(MCP4822::High);
-    
-    
-    // Connect the handleNoteOn function to the library,
-    // so it is called upon reception of a NoteOn.
-    MIDI.setHandleNoteOn(handleNoteOn);  // Put only the name of the function
 
-    // Do the same for NoteOffs
+    //set initial state
+    dac.setVoltageA(0);
+    dac.setVoltageB(0);
+
+   //update dac
+    dac.updateDAC();
+
+    delay(250);
+
+    // init MIDI ***************
+ 
+    MIDI.setHandleNoteOn(handleNoteOn);  
     MIDI.setHandleNoteOff(handleNoteOff);
-
     MIDI.setHandleClock(handleClock);
     MIDI.setHandleStart(handleStart);
     MIDI.setHandleContinue(handleContinue);
     MIDI.setHandleStop(handleStop);
 
-    // Initiate MIDI communications, listen to all channels
+    // Initiate MIDI communications, listen to MIDI_RXCH channels // was: listen to all channels
     MIDI.begin(MIDI_RXCH); //(MIDI_CHANNEL_OMNI);
+
+    //let's go ***************
+     
+#ifdef _COOLFUN_LED_MORSE
+
+    // Send a string in Morse Code to the led
+    morse.send(MORSE_STRING);
+#else
+    pulseLED( true );
+#endif
+
 }
+
+// -----------------------------------------------------------------------------
+// MAIN
+// loop forever
 
 void loop()
 {
       // Call MIDI.read the fastest you can for real-time performance.
       MIDI.read();
-    
-      // We send the command to the MCP4822
-      // This is needed every time we make any change
-      dac.updateDAC();
     
       //update Clock Out
       updateClockOut( false );
